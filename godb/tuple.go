@@ -5,7 +5,9 @@ package godb
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/mitchellh/hashstructure/v2"
@@ -31,6 +33,22 @@ type FieldType struct {
 	Ftype          DBType
 }
 
+func (ft1 *FieldType) equals(ft2 *FieldType) bool {
+	if ft1.Fname != ft2.Fname {
+		return false
+	}
+
+	if ft1.TableQualifier != ft2.TableQualifier {
+		return false
+	}
+
+	if ft1.Ftype != ft2.Ftype {
+		return false
+	}
+
+	return true
+}
+
 // TupleDesc is "type" of the tuple, e.g., the field names and types
 type TupleDesc struct {
 	Fields []FieldType
@@ -40,9 +58,17 @@ type TupleDesc struct {
 // all of their field objects are equal and they
 // are the same length
 func (d1 *TupleDesc) equals(d2 *TupleDesc) bool {
-	// TODO: some code goes here
-	return true
+	if len(d1.Fields) != len(d2.Fields) {
+		return false
+	}
 
+	for i := 0; i < len(d1.Fields); i++ {
+		if !d1.Fields[i].equals(&d2.Fields[i]) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // Given a FieldType f and a TupleDesc desc, find the best
@@ -68,7 +94,6 @@ func findFieldInTd(field FieldType, desc *TupleDesc) (int, error) {
 		return best, nil
 	}
 	return -1, GoDBError{IncompatibleTypesError, fmt.Sprintf("field %s.%s not found", field.TableQualifier, field.Fname)}
-
 }
 
 // Make a copy of a tuple desc.  Note that in go, assignment of a slice to
@@ -76,7 +101,11 @@ func findFieldInTd(field FieldType, desc *TupleDesc) (int, error) {
 // Look at the built-in function "copy".
 func (td *TupleDesc) copy() *TupleDesc {
 	// TODO: some code goes here
-	return &TupleDesc{} //replace me
+	s := make([]FieldType, len(td.Fields))
+	copy(s, td.Fields)
+	return &TupleDesc{
+		Fields: s,
+	}
 }
 
 // Assign the TableQualifier of every field in the TupleDesc to be the
@@ -95,8 +124,9 @@ func (td *TupleDesc) setTableAlias(alias string) {
 // should consist of the fields of desc2
 // appended onto the fields of desc.
 func (desc *TupleDesc) merge(desc2 *TupleDesc) *TupleDesc {
-	// TODO: some code goes here
-	return &TupleDesc{}  //replace me
+	cp := desc.copy()
+	cp.Fields = append(cp.Fields, desc2.Fields...)
+	return cp
 }
 
 // ================== Tuple Methods ======================
@@ -144,8 +174,46 @@ type recordID interface {
 // May return an error if the buffer has insufficient capacity to store the
 // tuple.
 func (t *Tuple) writeTo(b *bytes.Buffer) error {
-	// TODO: some code goes here
-	return nil //replace me
+	for i, f := range t.Desc.Fields {
+		switch f.Ftype {
+		case IntType:
+			tf, ok := t.Fields[i].(IntField)
+			if !ok {
+				return fmt.Errorf("unmatch int type")
+			}
+			res := tf.Value
+			myBytes := make([]byte, 4) // Assuming a 4-byte integer, adjust as needed
+			binary.LittleEndian.PutUint32(myBytes, uint32(res))
+			n, err := b.Write(myBytes)
+			if err != nil {
+				return err
+			}
+			if n != 4 {
+				return fmt.Errorf("buffer insufficient to write int")
+			}
+		case StringType:
+			ts, ok := t.Fields[i].(StringField)
+			if !ok {
+				return fmt.Errorf("field con not match string")
+			}
+			res := ts.Value
+			if len(res) > StringLength {
+				return fmt.Errorf("too large string")
+			}
+			n, err := b.WriteString(res)
+			if err != nil || n != len(res) {
+				return fmt.Errorf("buffer too small")
+			}
+			for i := 0; i < StringLength-len(res); i++ {
+				if err := b.WriteByte(0); err != nil {
+					return err
+				}
+			}
+		default:
+			panic("unknown type")
+		}
+	}
+	return nil
 }
 
 // Read the contents of a tuple with the specified [TupleDesc] from the
@@ -163,8 +231,42 @@ func (t *Tuple) writeTo(b *bytes.Buffer) error {
 // tuple.
 func readTupleFrom(b *bytes.Buffer, desc *TupleDesc) (*Tuple, error) {
 	// TODO: some code goes here
-	return nil, nil //replace me
+	fields := make([]DBValue, len(desc.Fields))
+	offset := 0
+	input := b.Bytes()
+	for i, f := range desc.Fields {
+		switch f.Ftype {
+		case IntType:
+			if len(input) < offset+4 {
+				return nil, fmt.Errorf("readTupleFrom has not enough buffer to int")
+			}
+			res := int(binary.LittleEndian.Uint32(input[offset : offset+4]))
+			fields[i] = IntField{Value: int64(res)}
+			offset += 4
+		case StringType:
+			if len(input) < offset+StringLength {
+				return nil, fmt.Errorf("readTupleFrom has not enough buffer to string")
+			}
+			res := ""
+			for ii := StringLength; ii >= 1; ii-- {
+				if input[offset+ii-1] != 0 {
+					res = string(input[offset : offset+ii])
+					break
+				}
+			}
+			fields[i] = StringField{Value: res}
+			offset += StringLength
+		default:
+			panic("unknown type")
+		}
+	}
 
+	t := &Tuple{
+		Desc:   *desc,
+		Fields: fields,
+		Rid:    nil,
+	}
+	return t, nil
 }
 
 // Compare two tuples for equality.  Equality means that the TupleDescs are equal
@@ -173,13 +275,30 @@ func readTupleFrom(b *bytes.Buffer, desc *TupleDesc) (*Tuple, error) {
 // operators.
 func (t1 *Tuple) equals(t2 *Tuple) bool {
 	// TODO: some code goes here
+	if !t1.Desc.equals(&t2.Desc) {
+		return false
+	}
+
+	for i, f := range t1.Fields {
+		if f != t2.Fields[i] {
+			return false
+		}
+	}
+
 	return true
 }
 
 // Merge two tuples together, producing a new tuple with the fields of t2 appended to t1.
 func joinTuples(t1 *Tuple, t2 *Tuple) *Tuple {
 	// TODO: some code goes here
-	return &Tuple{}
+	desc1 := TupleDesc{
+		Fields: append(t1.Desc.Fields, t2.Desc.Fields...),
+	}
+	return &Tuple{
+		Desc:   desc1,
+		Fields: append(t1.Fields, t2.Fields...),
+		Rid:    nil,
+	}
 }
 
 type orderByState int
@@ -189,6 +308,10 @@ const (
 	OrderedEqual       orderByState = iota
 	OrderedGreaterThan orderByState = iota
 )
+
+func isSameType(x, y interface{}) bool {
+	return reflect.TypeOf(x) == reflect.TypeOf(y)
+}
 
 // Apply the supplied expression to both t and t2, and compare the results,
 // returning an orderByState value.
@@ -203,7 +326,46 @@ const (
 // expression on the supplied tuple.
 func (t *Tuple) compareField(t2 *Tuple, field Expr) (orderByState, error) {
 	// TODO: some code goes here
-	return OrderedEqual, nil // replace me
+	// 获取t1的结果
+	val1, err := field.EvalExpr(t)
+	if err != nil {
+		return OrderedEqual, err
+	}
+
+	// 获取t2的结果
+	val2, err := field.EvalExpr(t2)
+	if err != nil {
+		return OrderedEqual, err
+	}
+
+	if !isSameType(val1, val2) {
+		return OrderedEqual, fmt.Errorf("compareField val1(%v) not equal val2(%v)", val1, val2)
+	}
+
+	switch val1.(type) {
+	case StringField:
+		v1 := val1.(StringField)
+		v2 := val2.(StringField)
+		if v1.Value == v2.Value {
+			return OrderedEqual, nil
+		} else if v1.Value > v2.Value {
+			return OrderedGreaterThan, nil
+		} else {
+			return OrderedLessThan, nil
+		}
+	case int:
+		v1 := val1.(IntField)
+		v2 := val2.(IntField)
+		if v1.Value == v2.Value {
+			return OrderedEqual, nil
+		} else if v1.Value > v2.Value {
+			return OrderedGreaterThan, nil
+		} else {
+			return OrderedLessThan, nil
+		}
+	default:
+		return OrderedEqual, fmt.Errorf("compareField unknown type")
+	}
 }
 
 // Project out the supplied fields from the tuple. Should return a new Tuple
@@ -214,7 +376,25 @@ func (t *Tuple) compareField(t2 *Tuple, field Expr) (orderByState, error) {
 // entry t2.name in t, but only if there is not an entry t1.name in t)
 func (t *Tuple) project(fields []FieldType) (*Tuple, error) {
 	// TODO: some code goes here
-	return nil, nil  //replace me
+	res := &Tuple{
+		Desc: TupleDesc{
+			Fields: fields,
+		},
+		Fields: []DBValue{},
+		Rid:    nil,
+	}
+
+	// 找到对应的fields
+	for _, f := range fields {
+		i, err := findFieldInTd(f, &t.Desc)
+		if err != nil {
+			return nil, err
+		}
+
+		res.Fields = append(res.Fields, t.Fields[i])
+	}
+
+	return res, nil
 }
 
 // Compute a key for the tuple to be used in a map structure

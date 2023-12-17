@@ -39,7 +39,7 @@ func TestTupleSerialization(t *testing.T) {
 	t1.writeTo(b)
 	t3, err := readTupleFrom(b, &td)
 	if err != nil {
-		t.Fatalf("Error loading tuple from saved buffer.")
+		t.Fatalf("Error loading tuple from saved buffer. %v", err)
 	}
 	if !t3.equals(&t1) {
 		t.Errorf("Serialization / deserialization doesn't result in identical tuple.")

@@ -141,7 +141,6 @@ func (f *HeapFile) readPage(pageNo int) (*Page, error) {
 func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) error {
 	// TODO: some code goes here
 	return nil //replace me
-
 }
 
 // Remove the provided tuple from the HeapFile.  This method should use the

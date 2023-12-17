@@ -153,6 +153,7 @@ func addTupleToGrpAggState(a *Aggregator, t *Tuple, grpAggState *[]AggState) {
 // joinTuples function in tuple.go you wrote in lab 1.
 func getFinalizedTuplesIterator(a *Aggregator, groupByList []*Tuple, aggState map[any]*[]AggState) func() (*Tuple, error) {
 	curGbyTuple := 0 // "captured" counter to track the current tuple we are iterating over
+	_ = curGbyTuple
 	return func() (*Tuple, error) {
 		// TODO: some code goes here
 		return nil, nil // TODO change me
